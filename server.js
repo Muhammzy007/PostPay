@@ -18,24 +18,14 @@ const sgMail = require('@sendgrid/mail');
 const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 
-// ==================== RENDER.COM CONFIGURATION ====================
-// Handle both development and production environments
-let DATA_DIR, UPLOADS_DIR, BACKUPS_DIR;
-
-if (process.env.NODE_ENV === 'production') {
-  // Production on Render - use absolute paths
-  DATA_DIR = '/opt/render/project/src/data';
-  UPLOADS_DIR = '/opt/render/project/src/data/uploads';
-  BACKUPS_DIR = '/opt/render/project/src/data/backups';
-  console.log('✅ Production mode - using Render data paths');
-} else {
-  // Development environment
-  const ROOT = __dirname;
-  DATA_DIR = path.join(ROOT, 'data');
-  UPLOADS_DIR = path.join(ROOT, 'uploads');
-  BACKUPS_DIR = path.join(ROOT, 'backups');
-  console.log('✅ Development mode - using local data storage');
-}
+// ==================== RAILWAY DEPLOYMENT CONFIGURATION ====================
+// Simple configuration that works everywhere
+const ROOT = __dirname;
+const DATA_DIR = process.env.NODE_ENV === 'production' 
+  ? path.join(ROOT, 'data')  // Railway uses the same file system
+  : path.join(ROOT, 'data');
+const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
 
 // Create directories if they don't exist
 [DATA_DIR, UPLOADS_DIR, BACKUPS_DIR].forEach(dir => {
@@ -44,12 +34,10 @@ if (process.env.NODE_ENV === 'production') {
     console.log(`✅ Created directory: ${dir}`);
   }
 });
-// ==================== END RENDER.COM CONFIGURATION ====================
+// ==================== END RAILWAY CONFIGURATION ====================
 
 const PORT = Number(process.env.PORT || 3000);
 const app = express();
-
-// Continue with the rest of your code...
 
 // Middleware setup
 app.use(express.urlencoded({ extended: true }));
@@ -60,7 +48,6 @@ app.use(rateLimit({ windowMs: 60 * 1000, max: 60 }));
 
 // Database setup - FIXED FOR LOWDB v7+
 const adapter = new JSONFileSync(path.join(DATA_DIR, 'db.json'));
-// ... rest of your existing code continues unchanged
 const defaultData = {
   users: [],
   activations: [],
@@ -119,6 +106,9 @@ const upload = multer({
     }
   }
 });
+
+// ... REST OF YOUR EXISTING CODE REMAINS EXACTLY THE SAME ...
+// Continue with all your routes, middleware, and other functionality
 
 // Email configuration - SendGrid
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || '';
