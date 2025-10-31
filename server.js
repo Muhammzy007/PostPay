@@ -19,27 +19,17 @@ const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 
 // ==================== RENDER.COM CONFIGURATION ====================
-// Render.com specific setup for persistent data
+// Handle both development and production environments
 let DATA_DIR, UPLOADS_DIR, BACKUPS_DIR;
 
 if (process.env.NODE_ENV === 'production') {
-  // Use Render's persistent disk for data
-  const renderDataDir = '/opt/render/project/src/data';
-  if (fs.existsSync(renderDataDir)) {
-    DATA_DIR = path.join(renderDataDir, 'postpay');
-    UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
-    BACKUPS_DIR = path.join(DATA_DIR, 'backups');
-    console.log('✅ Using Render persistent disk for data storage');
-  } else {
-    // Fallback to original paths if Render disk doesn't exist
-    const ROOT = __dirname;
-    DATA_DIR = path.join(ROOT, 'data');
-    UPLOADS_DIR = path.join(ROOT, 'uploads');
-    BACKUPS_DIR = path.join(ROOT, 'backups');
-    console.log('✅ Using local file system for data storage');
-  }
+  // Production on Render - use absolute paths
+  DATA_DIR = '/opt/render/project/src/data';
+  UPLOADS_DIR = '/opt/render/project/src/data/uploads';
+  BACKUPS_DIR = '/opt/render/project/src/data/backups';
+  console.log('✅ Production mode - using Render data paths');
 } else {
-  // Development environment - use original paths
+  // Development environment
   const ROOT = __dirname;
   DATA_DIR = path.join(ROOT, 'data');
   UPLOADS_DIR = path.join(ROOT, 'uploads');
@@ -56,12 +46,10 @@ if (process.env.NODE_ENV === 'production') {
 });
 // ==================== END RENDER.COM CONFIGURATION ====================
 
-const PORT = Number(process.env.PORT || 10000);
-// Note: ROOT is no longer used since we're handling paths above
-// Remove this line: const ROOT = __dirname;
-
-// Continue with the rest of your existing code...
+const PORT = Number(process.env.PORT || 3000);
 const app = express();
+
+// Continue with the rest of your code...
 
 // Middleware setup
 app.use(express.urlencoded({ extended: true }));
