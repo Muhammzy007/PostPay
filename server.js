@@ -212,16 +212,17 @@ const EMAIL_FROM = process.env.EMAIL_FROM || 'techmagnet.pro@gmail.com';
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || 'PostPay Platform';
 
 let emailConfigured = false;
+
 if (SENDGRID_API_KEY) {
-    try {
-        sgMail.setApiKey(SENDGRID_API_KEY);
-        emailConfigured = true;
-        console.log('✅ SendGrid email configured successfully');
-    } catch (error) {
-        console.log('❌ SendGrid configuration error:', error.message);
-    }
+  try {
+    sgMail.setApiKey(SENDGRID_API_KEY);
+    emailConfigured = true;
+    console.log('✅ SendGrid email configured successfully');
+  } catch (error) {
+    console.log('❌ SendGrid configuration error:', error.message);
+  }
 } else {
-    console.log('⚠️ SENDGRID_API_KEY not set - emails will not be sent');
+  console.log('⚠️ SENDGRID_API_KEY not set - emails will not be sent');
 }
 
 // Redis and session configuration - EXACTLY AS ORIGINAL
