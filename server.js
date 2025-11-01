@@ -42,13 +42,13 @@ class JSONDatabase {
                 console.log('✅ Database loaded from:', this.filePath);
             } else {
                 this.data = this.getDefaultData();
-                this.save();
+                this.write();
                 console.log('✅ New database created with default data');
             }
         } catch (error) {
             console.log('❌ Database load error, creating new database:', error.message);
             this.data = this.getDefaultData();
-            this.save();
+            this.write();
         }
         return this;
     }
