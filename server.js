@@ -54,35 +54,35 @@ class JSONDatabase {
     }
 
     getDefaultData() {
-        const adminEmail = process.env.ADMIN_EMAIL || 'techmagnet.pro@gmail.com';
-        const adminPassword = process.env.ADMIN_PASSWORD || '@UniqueP01';
-        
-        return {
-            users: [],
-            activations: [],
-            displays: [],
-            editRequests: [],
-            payments: [],
-            adminLogs: [],
-            emailQueue: [],
-            settings: {
-                activationPrice: 50,
-                editPrice: 19,
-                validityDays: Number(process.env.VALIDITY_DAYS || 30),
-                editAccessHours: Number(process.env.EDIT_ACCESS_HOURS || 24),
-                bep20Address: '0x626Cf0750f44FEa35E1e295082fe80D0F6E9234a',
-                trc20Address: 'TGE4Yb9USJWKeXEjFNUstE584',
-                usdtTrc20Contract: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
-                usdtBep20Contract: '0x55d398326f99059fF775485246999027B3197955',
-                trc20Decimals: 6,
-                bep20Decimals: 18
-            },
-            admin: {
-                email: adminEmail,
-                passwordHash: bcrypt.hashSync(adminPassword, 10)
-            }
-        };
+  const adminEmail = process.env.ADMIN_EMAIL || 'techmagnet.pro@gmail.com';
+  const adminPassword = process.env.ADMIN_PASSWORD || '@UniqueP01';
+  
+  return {
+    users: [],
+    activations: [],
+    displays: [],
+    editRequests: [],
+    payments: [],
+    adminLogs: [],
+    emailQueue: [],
+    settings: {
+      activationPrice: Number(process.env.ACTIVATION_PRICE || 50),
+      editPrice: Number(process.env.EDIT_PRICE || 19),
+      validityDays: Number(process.env.VALIDITY_DAYS || 30),
+      editAccessHours: Number(process.env.EDIT_ACCESS_HOURS || 24),
+      bep20Address: process.env.BEP20_ADDRESS || '0x626Cf0750f44FEa35E1e295082fe80D0F6E9234a',
+      trc20Address: process.env.TRC20_ADDRESS || 'TGE4Yb9USJWKeXEjFNUstE584',
+      usdtTrc20Contract: process.env.USDT_TRC20_CONTRACT || 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
+      usdtBep20Contract: process.env.USDT_BEP20_CONTRACT || '0x55d398326f99059fF775485246999027B3197955',
+      trc20Decimals: 6,
+      bep20Decimals: 18
+    },
+    admin: {
+      email: adminEmail,
+      passwordHash: bcrypt.hashSync(adminPassword, 10)
     }
+  };
+}
 
     read() {
         // For compatibility with original code structure
@@ -212,16 +212,17 @@ const EMAIL_FROM = process.env.EMAIL_FROM || 'techmagnet.pro@gmail.com';
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || 'PostPay Platform';
 
 let emailConfigured = false;
+
 if (SENDGRID_API_KEY) {
-    try {
-        sgMail.setApiKey(SENDGRID_API_KEY);
-        emailConfigured = true;
-        console.log('✅ SendGrid email configured successfully');
-    } catch (error) {
-        console.log('❌ SendGrid configuration error:', error.message);
-    }
+  try {
+    sgMail.setApiKey(SENDGRID_API_KEY);
+    emailConfigured = true;
+    console.log('✅ SendGrid email configured successfully');
+  } catch (error) {
+    console.log('❌ SendGrid configuration error:', error.message);
+  }
 } else {
-    console.log('⚠️ SENDGRID_API_KEY not set - emails will not be sent');
+  console.log('⚠️ SENDGRID_API_KEY not set - emails will not be sent');
 }
 
 // Redis and session configuration - EXACTLY AS ORIGINAL
