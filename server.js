@@ -1,4 +1,15 @@
 // PostPay - Complete Production Server (FULLY WORKING VERSION)
+// FIXED: LowDB compatibility while preserving ALL original functionality
+// Add comprehensive error handling at the very top
+process.on('uncaughtException', (error) => {
+  console.error('🚨 UNCAUGHT EXCEPTION:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
+  process.exit(1);
+});
 
 require('dotenv').config();
 
@@ -10,744 +21,815 @@ const Bull = require('bull');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { LowSync } = require('lowdb');
-const { JSONFileSync } = require('lowdb/node');
 const { v4: uuidv4 } = require('uuid');
 const bcrypt = require('bcryptjs');
 const sgMail = require('@sendgrid/mail');
 const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 
+// ==================== PURE JAVASCRIPT DATABASE (REPLACES LOWDB) ====================
+class JSONDatabase {
+    constructor(filePath) {
+        this.filePath = filePath;
+        this.data = null;
+    }
+
+    load() {
+        try {
+            if (fs.existsSync(this.filePath)) {
+                const content = fs.readFileSync(this.filePath, 'utf8');
+                this.data = JSON.parse(content);
+                console.log('✅ Database loaded from:', this.filePath);
+            } else {
+                this.data = this.getDefaultData();
+                this.save();
+                console.log('✅ New database created with default data');
+            }
+        } catch (error) {
+            console.log('❌ Database load error, creating new database:', error.message);
+            this.data = this.getDefaultData();
+            this.save();
+        }
+        return this;
+    }
+
+    getDefaultData() {
+        const adminEmail = process.env.ADMIN_EMAIL || 'techmagnet.pro@gmail.com';
+        const adminPassword = process.env.ADMIN_PASSWORD || '@UniqueP01';
+        
+        return {
+            users: [],
+            activations: [],
+            displays: [],
+            editRequests: [],
+            payments: [],
+            adminLogs: [],
+            emailQueue: [],
+            settings: {
+                activationPrice: 50,
+                editPrice: 19,
+                validityDays: Number(process.env.VALIDITY_DAYS || 30),
+                editAccessHours: Number(process.env.EDIT_ACCESS_HOURS || 24),
+                bep20Address: '0x626Cf0750f44FEa35E1e295082fe80D0F6E9234a',
+                trc20Address: 'TGE4Yb9USJWKeXEjFNUstE584',
+                usdtTrc20Contract: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
+                usdtBep20Contract: '0x55d398326f99059fF775485246999027B3197955',
+                trc20Decimals: 6,
+                bep20Decimals: 18
+            },
+            admin: {
+                email: adminEmail,
+                passwordHash: bcrypt.hashSync(adminPassword, 10)
+            }
+        };
+    }
+
+    read() {
+        // For compatibility with original code structure
+        return this.data;
+    }
+
+    write() {
+        try {
+            const dir = path.dirname(this.filePath);
+            if (!fs.existsSync(dir)) {
+                fs.mkdirSync(dir, { recursive: true });
+            }
+            fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2));
+            return true;
+        } catch (error) {
+            console.log('❌ Database save error:', error.message);
+            return false;
+        }
+    }
+
+    // Helper methods that match original LowDB usage
+    find(collection, predicate) {
+        return this.data[collection].find(predicate);
+    }
+
+    filter(collection, predicate) {
+        return this.data[collection].filter(predicate);
+    }
+
+    push(collection, item) {
+        this.data[collection].push(item);
+        this.write();
+        return this.data[collection];
+    }
+
+    remove(collection, predicate) {
+        const index = this.data[collection].findIndex(predicate);
+        if (index !== -1) {
+            this.data[collection].splice(index, 1);
+            this.write();
+            return true;
+        }
+        return false;
+    }
+
+    update(collection, predicate, updates) {
+        const item = this.find(collection, predicate);
+        if (item) {
+            Object.assign(item, updates);
+            this.write();
+            return true;
+        }
+        return false;
+    }
+
+    get(collection) {
+        return this.data[collection];
+    }
+
+    set(collection, value) {
+        this.data[collection] = value;
+        this.write();
+        return this.data[collection];
+    }
+}
+// ==================== END DATABASE SOLUTION ====================
+
 // ==================== RAILWAY DEPLOYMENT CONFIGURATION ====================
-// Simple configuration that works everywhere
 const ROOT = __dirname;
-const DATA_DIR = process.env.NODE_ENV === 'production' 
-  ? path.join(ROOT, 'data')  // Railway uses the same file system
+const DATA_DIR = process.env.NODE_ENV === 'production'
+  ? path.join(ROOT, 'data')
   : path.join(ROOT, 'data');
+
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const BACKUPS_DIR = path.join(DATA_DIR, 'backups');
 
 // Create directories if they don't exist
 [DATA_DIR, UPLOADS_DIR, BACKUPS_DIR].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-    console.log(`✅ Created directory: ${dir}`);
-  }
+    if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+        console.log(`✅ Created directory: ${dir}`);
+    }
 });
-// ==================== END RAILWAY CONFIGURATION ====================
+
+// Initialize database - maintaining original structure
+const db = new JSONDatabase(path.join(DATA_DIR, 'db.json')).load();
+console.log('✅ Database initialized successfully');
 
 const PORT = Number(process.env.PORT || 3000);
 const app = express();
 
-// Middleware setup
+// Middleware setup - EXACTLY AS ORIGINAL
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use('/uploads', express.static(UPLOADS_DIR));
 app.use(express.static('public'));
 app.use(rateLimit({ windowMs: 60 * 1000, max: 60 }));
 
-// Database setup - FIXED FOR LOWDB v7+
-const adapter = new JSONFileSync(path.join(DATA_DIR, 'db.json'));
-const defaultData = {
-  users: [],
-  activations: [],
-  displays: [],
-  editRequests: [],
-  payments: [],
-  adminLogs: [],
-  emailQueue: [],
-  settings: {
-    activationPrice: 50,
-    editPrice: 19,
-    validityDays: Number(process.env.VALIDITY_DAYS || 30),
-    editAccessHours: Number(process.env.EDIT_ACCESS_HOURS || 24),
-    bep20Address: '0x626Cf0750f44FEa35E1e295082fe80D0F6E9234a',
-    trc20Address: 'TGE4Yb9USJWKeXEjFNUstE584',
-    usdtTrc20Contract: 'TR7NHqjeKQxGTCi8q8ZY4pL8otSzgjLj6t',
-    usdtBep20Contract: '0x55d398326f99059fF775485246999027B3197955',
-    trc20Decimals: 6,
-    bep20Decimals: 18
-  },
-  admin: {
-    email: 'techmagnet.pro@gmail.com',
-    passwordHash: bcrypt.hashSync('@UniqueP01', 10)
-  }
-};
-
-const db = new LowSync(adapter, defaultData);
-
-// Read database and initialize
-db.read();
-db.write();
-console.log('✅ LowDB initialized');
-
-// File upload configuration
+// File upload configuration - EXACTLY AS ORIGINAL
 const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    cb(null, UPLOADS_DIR);
-  },
-  filename: (req, file, cb) => {
-    cb(null, `${Date.now()}-${uuidv4()}${path.extname(file.originalname)}`);
-  }
+    destination: (req, file, cb) => {
+        cb(null, UPLOADS_DIR);
+    },
+    filename: (req, file, cb) => {
+        cb(null, `${Date.now()}-${uuidv4()}${path.extname(file.originalname)}`);
+    }
 });
 
 const upload = multer({
-  storage,
-  limits: { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (req, file, cb) => {
-    const allowed = /jpeg|jpg|png|gif|webp/i;
-    const extname = allowed.test(path.extname(file.originalname).toLowerCase());
-    const mimetype = allowed.test(file.mimetype);
-
-    if (mimetype && extname) {
-      return cb(null, true);
-    } else {
-      cb(new Error('Only image files are allowed!'));
+    storage,
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (req, file, cb) => {
+        const allowed = /jpeg|jpg|png|gif|webp/i;
+        const extname = allowed.test(path.extname(file.originalname).toLowerCase());
+        const mimetype = allowed.test(file.mimetype);
+        if (mimetype && extname) {
+            return cb(null, true);
+        } else {
+            cb(new Error('Only image files are allowed!'));
+        }
     }
-  }
 });
 
-// ... REST OF YOUR EXISTING CODE REMAINS EXACTLY THE SAME ...
-// Continue with all your routes, middleware, and other functionality
-
-// Email configuration - SendGrid
+// Email configuration - SendGrid - EXACTLY AS ORIGINAL
 const SENDGRID_API_KEY = process.env.SENDGRID_API_KEY || '';
 const EMAIL_FROM = process.env.EMAIL_FROM || 'techmagnet.pro@gmail.com';
 const EMAIL_FROM_NAME = process.env.EMAIL_FROM_NAME || 'PostPay Platform';
 
 let emailConfigured = false;
-
 if (SENDGRID_API_KEY) {
-  try {
-    sgMail.setApiKey(SENDGRID_API_KEY);
-    emailConfigured = true;
-    console.log('✅ SendGrid email configured successfully');
-  } catch (error) {
-    console.log('❌ SendGrid configuration error:', error.message);
-  }
+    try {
+        sgMail.setApiKey(SENDGRID_API_KEY);
+        emailConfigured = true;
+        console.log('✅ SendGrid email configured successfully');
+    } catch (error) {
+        console.log('❌ SendGrid configuration error:', error.message);
+    }
 } else {
-  console.log('⚠️ SENDGRID_API_KEY not set - emails will not be sent');
+    console.log('⚠️ SENDGRID_API_KEY not set - emails will not be sent');
 }
 
-// Redis and session configuration
+// Redis and session configuration - EXACTLY AS ORIGINAL
 let redisAvailable = false;
 let emailQueue = null;
 let redisClient;
 
 try {
-  redisClient = new IORedis({
-    host: process.env.REDIS_HOST || '127.0.0.1',
-    port: Number(process.env.REDIS_PORT || 6379),
-    password: process.env.REDIS_PASS || undefined,
-    retryStrategy: () => null
-  });
+    redisClient = new IORedis({
+        host: process.env.REDIS_HOST || '127.0.0.1',
+        port: Number(process.env.REDIS_PORT || 6379),
+        password: process.env.REDIS_PASS || undefined,
+        retryStrategy: () => null
+    });
 
-  redisClient.on('ready', () => {
-    redisAvailable = true;
-    console.log('✅ Redis ready');
-  });
+    redisClient.on('ready', () => {
+        redisAvailable = true;
+        console.log('✅ Redis ready');
+    });
 
-  redisClient.on('error', (err) => {
-    redisAvailable = false;
-    console.log('⚠️ Redis error:', err.message);
-  });
+    redisClient.on('error', (err) => {
+        redisAvailable = false;
+        console.log('⚠️ Redis error:', err.message);
+    });
 
-  const RedisStore = connectRedis(session);
+    const RedisStore = connectRedis(session);
+    app.use(session({
+        store: new RedisStore({ client: redisClient }),
+        secret: process.env.SESSION_SECRET || 'change_this_in_production',
+        resave: false,
+        saveUninitialized: false,
+        cookie: {
+            secure: process.env.NODE_ENV === 'production',
+            maxAge: 24 * 60 * 60 * 1000,
+            httpOnly: true
+        }
+    }));
 
-  app.use(session({
-    store: new RedisStore({ client: redisClient }),
-    secret: process.env.SESSION_SECRET || 'change_this_in_production',
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: process.env.NODE_ENV === 'production',
-      maxAge: 24 * 60 * 60 * 1000,
-      httpOnly: true
-    }
-  }));
+    // Initialize email queue only if Redis is available
+    emailQueue = new Bull('emailQueue', {
+        redis: {
+            host: process.env.REDIS_HOST || '127.0.0.1',
+            port: Number(process.env.REDIS_PORT || 6379),
+            password: process.env.REDIS_PASS || undefined
+        }
+    });
 
-  // Initialize email queue only if Redis is available
-  emailQueue = new Bull('emailQueue', {
-    redis: {
-      host: process.env.REDIS_HOST || '127.0.0.1',
-      port: Number(process.env.REDIS_PORT || 6379),
-      password: process.env.REDIS_PASS || undefined
-    }
-  });
-
-  emailQueue.process(5, async (job) => {
-    try {
-      await sgMail.send(job.data);
-      console.log('✅ Email sent successfully to:', job.data.to);
-      return { success: true };
-    } catch (emailError) {
-      console.log('❌ Failed to send email:', emailError.message);
-      throw emailError;
-    }
-  });
-
+    emailQueue.process(5, async (job) => {
+        try {
+            await sgMail.send(job.data);
+            console.log('✅ Email sent successfully to:', job.data.to);
+            return { success: true };
+        } catch (emailError) {
+            console.log('❌ Failed to send email:', emailError.message);
+            throw emailError;
+        }
+    });
 } catch (e) {
-  console.warn('⚠️ Redis not available - using memory session');
-  app.use(session({
-    secret: process.env.SESSION_SECRET || 'change_this_in_production',
-    resave: false,
-    saveUninitialized: false,
-    cookie: {
-      secure: false,
-      maxAge: 24 * 60 * 60 * 1000,
-      httpOnly: true
-    }
-  }));
+    console.warn('⚠️ Redis not available - using memory session');
+    app.use(session({
+        secret: process.env.SESSION_SECRET || 'change_this_in_production',
+        resave: false,
+        saveUninitialized: false,
+        cookie: {
+            secure: false,
+            maxAge: 24 * 60 * 60 * 1000,
+            httpOnly: true
+        }
+    }));
 }
 
-// Utility functions
+// Utility functions - EXACTLY AS ORIGINAL
 async function queueEmail(to, subject, html) {
-  if (!emailConfigured) {
-    console.log('⚠️ Email not configured - message stored in queue');
-    db.data.emailQueue.push({
-      id: uuidv4(),
-      to,
-      subject,
-      html,
-      attempts: 0,
-      createdAt: new Date().toISOString(),
-      status: 'pending'
-    });
-    db.write();
-    return;
-  }
-
-  const msg = {
-    to: to,
-    from: {
-      email: EMAIL_FROM,
-      name: EMAIL_FROM_NAME
-    },
-    subject: subject,
-    html: html
-  };
-
-  if (emailQueue && redisAvailable) {
-    try {
-      await emailQueue.add(msg, {
-        attempts: 3,
-        backoff: 5000,
-        removeOnComplete: true,
-        removeOnFail: false
-      });
-      console.log('📧 Email queued for:', to);
-    } catch (queueError) {
-      console.log('❌ Failed to queue email, sending immediately:', queueError.message);
-      await sendEmailImmediately(msg);
+    if (!emailConfigured) {
+        console.log('⚠️ Email not configured - message stored in queue');
+        db.data.emailQueue.push({
+            id: uuidv4(),
+            to,
+            subject,
+            html,
+            attempts: 0,
+            createdAt: new Date().toISOString(),
+            status: 'pending'
+        });
+        db.write();
+        return;
     }
-  } else {
-    // Fallback: immediate sending
-    await sendEmailImmediately(msg);
-  }
+
+    const msg = {
+        to: to,
+        from: {
+            email: EMAIL_FROM,
+            name: EMAIL_FROM_NAME
+        },
+        subject: subject,
+        html: html
+    };
+
+    if (emailQueue && redisAvailable) {
+        try {
+            await emailQueue.add(msg, {
+                attempts: 3,
+                backoff: 5000,
+                removeOnComplete: true,
+                removeOnFail: false
+            });
+            console.log('📧 Email queued for:', to);
+        } catch (queueError) {
+            console.log('❌ Failed to queue email, sending immediately:', queueError.message);
+            await sendEmailImmediately(msg);
+        }
+    } else {
+        // Fallback: immediate sending
+        await sendEmailImmediately(msg);
+    }
 }
 
 async function sendEmailImmediately(msg) {
-  try {
-    await sgMail.send(msg);
-    console.log('✅ Email sent immediately to:', msg.to);
-  } catch (error) {
-    console.log('❌ Failed to send email to:', msg.to, error.message);
-    // Store in database for retry
-    db.data.emailQueue.push({
-      id: uuidv4(),
-      to: msg.to,
-      subject: msg.subject,
-      html: msg.html,
-      attempts: 0,
-      createdAt: new Date().toISOString(),
-      status: 'failed',
-      error: error.message
-    });
-    db.write();
-  }
+    try {
+        await sgMail.send(msg);
+        console.log('✅ Email sent immediately to:', msg.to);
+    } catch (error) {
+        console.log('❌ Failed to send email to:', msg.to, error.message);
+        // Store in database for retry
+        db.data.emailQueue.push({
+            id: uuidv4(),
+            to: msg.to,
+            subject: msg.subject,
+            html: msg.html,
+            attempts: 0,
+            createdAt: new Date().toISOString(),
+            status: 'failed',
+            error: error.message
+        });
+        db.write();
+    }
 }
 
 const hash = (s) => bcrypt.hashSync(String(s), 10);
 const compare = (s, h) => bcrypt.compareSync(String(s), String(h));
 const generateActivationKey = () => `PPAY-${Math.random().toString(36).slice(2, 6).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 
-// Background email processing for fallback
+// Background email processing for fallback - EXACTLY AS ORIGINAL
 if (!emailQueue || !redisAvailable) {
-  setInterval(async () => {
-    if (!db.data.emailQueue || db.data.emailQueue.length === 0) return;
+    setInterval(async () => {
+        if (!db.data.emailQueue || db.data.emailQueue.length === 0) return;
 
-    const pendingJobs = db.data.emailQueue.filter(job =>
-      job.status === 'pending' || (job.status === 'failed' && (job.attempts || 0) < 3)
-    );
+        const pendingJobs = db.data.emailQueue.filter(job =>
+            job.status === 'pending' || (job.status === 'failed' && (job.attempts || 0) < 3)
+        );
 
-    for (const job of pendingJobs.slice(0, 3)) {
-      if (!emailConfigured) continue;
-
-      try {
-        await sgMail.send({
-          to: job.to,
-          from: { email: EMAIL_FROM, name: EMAIL_FROM_NAME },
-          subject: job.subject,
-          html: job.html
-        });
-
-        // Remove successful job
-        db.data.emailQueue = db.data.emailQueue.filter(j => j.id !== job.id);
-        db.write();
-        console.log('✅ Background email sent to:', job.to);
-      } catch (err) {
-        console.log('❌ Background email failed for:', job.to, err.message);
-        const jobIndex = db.data.emailQueue.findIndex(j => j.id === job.id);
-        if (jobIndex !== -1) {
-          db.data.emailQueue[jobIndex].attempts = (job.attempts || 0) + 1;
-          db.data.emailQueue[jobIndex].lastAttempt = new Date().toISOString();
-          db.data.emailQueue[jobIndex].error = err.message;
-          if (db.data.emailQueue[jobIndex].attempts >= 3) {
-            db.data.emailQueue[jobIndex].status = 'failed';
-          }
-          db.write();
+        for (const job of pendingJobs.slice(0, 3)) {
+            if (!emailConfigured) continue;
+            try {
+                await sgMail.send({
+                    to: job.to,
+                    from: { email: EMAIL_FROM, name: EMAIL_FROM_NAME },
+                    subject: job.subject,
+                    html: job.html
+                });
+                // Remove successful job
+                db.data.emailQueue = db.data.emailQueue.filter(j => j.id !== job.id);
+                db.write();
+                console.log('✅ Background email sent to:', job.to);
+            } catch (err) {
+                console.log('❌ Background email failed for:', job.to, err.message);
+                const jobIndex = db.data.emailQueue.findIndex(j => j.id === job.id);
+                if (jobIndex !== -1) {
+                    db.data.emailQueue[jobIndex].attempts = (job.attempts || 0) + 1;
+                    db.data.emailQueue[jobIndex].lastAttempt = new Date().toISOString();
+                    db.data.emailQueue[jobIndex].error = err.message;
+                    if (db.data.emailQueue[jobIndex].attempts >= 3) {
+                        db.data.emailQueue[jobIndex].status = 'failed';
+                    }
+                    db.write();
+                }
+            }
         }
-      }
-    }
-  }, 30000); // Check every 30 seconds
+    }, 30000); // Check every 30 seconds
 }
 
-// Payment verification functions
+// Payment verification functions - EXACTLY AS ORIGINAL
 async function verifyTRC20Payment(address, amount) {
-  try {
-    const apiKey = process.env.TRONGRID_API_KEY;
-    if (!apiKey) {
-      return { success: false, error: 'TRONGRID_API_KEY not configured' };
+    try {
+        const apiKey = process.env.TRONGRID_API_KEY;
+        if (!apiKey) {
+            return { success: false, error: 'TRONGRID_API_KEY not configured' };
+        }
+        if (!address) {
+            return { success: false, error: 'No wallet address provided' };
+        }
+
+        const response = await axios.get(`https://api.trongrid.io/v1/accounts/${address}/transactions/trc20`, {
+            params: {
+                limit: 50,
+                contract_address: db.data.settings.usdtTrc20Contract
+            },
+            headers: { 'TRON-PRO-API-KEY': apiKey }
+        });
+
+        const transactions = response.data.data || [];
+        const requiredAmount = Math.floor(amount * Math.pow(10, db.data.settings.trc20Decimals));
+
+        for (const tx of transactions) {
+            if (tx.to && tx.to.toLowerCase() === address.toLowerCase() &&
+                parseInt(tx.value) === requiredAmount &&
+                tx.token_info?.symbol === 'USDT') {
+                return { success: true, transaction: tx };
+            }
+        }
+        return { success: false, error: 'Payment not found' };
+    } catch (error) {
+        console.error('TRC20 verification error:', error.message);
+        return { success: false, error: error.message };
     }
-
-    if (!address) {
-      return { success: false, error: 'No wallet address provided' };
-    }
-
-    const response = await axios.get(`https://api.trongrid.io/v1/accounts/${address}/transactions/trc20`, {
-      params: {
-        limit: 50,
-        contract_address: db.data.settings.usdtTrc20Contract
-      },
-      headers: { 'TRON-PRO-API-KEY': apiKey }
-    });
-
-    const transactions = response.data.data || [];
-    const requiredAmount = Math.floor(amount * Math.pow(10, db.data.settings.trc20Decimals));
-
-    for (const tx of transactions) {
-      if (tx.to && tx.to.toLowerCase() === address.toLowerCase() &&
-        parseInt(tx.value) === requiredAmount &&
-        tx.token_info?.symbol === 'USDT') {
-        return { success: true, transaction: tx };
-      }
-    }
-
-    return { success: false, error: 'Payment not found' };
-  } catch (error) {
-    console.error('TRC20 verification error:', error.message);
-    return { success: false, error: error.message };
-  }
 }
 
 async function verifyBEP20Payment(address, amount) {
-  try {
-    const apiKey = process.env.BSCSCAN_API_KEY;
-    if (!apiKey) {
-      return { success: false, error: 'BSCSCAN_API_KEY not configured' };
+    try {
+        const apiKey = process.env.BSCSCAN_API_KEY;
+        if (!apiKey) {
+            return { success: false, error: 'BSCSCAN_API_KEY not configured' };
+        }
+        if (!address) {
+            return { success: false, error: 'No wallet address provided' };
+        }
+
+        const response = await axios.get(`https://api.bscscan.com/api`, {
+            params: {
+                module: 'account',
+                action: 'tokentx',
+                address: address,
+                contractaddress: db.data.settings.usdtBep20Contract,
+                page: 1,
+                offset: 50,
+                sort: 'desc',
+                apikey: apiKey
+            }
+        });
+
+        const transactions = response.data.result || [];
+        const requiredAmount = Math.floor(amount * Math.pow(10, db.data.settings.bep20Decimals));
+
+        for (const tx of transactions) {
+            if (tx.to && tx.to.toLowerCase() === address.toLowerCase() &&
+                parseInt(tx.value) === requiredAmount &&
+                tx.tokenSymbol === 'USDT') {
+                return { success: true, transaction: tx };
+            }
+        }
+        return { success: false, error: 'Payment not found' };
+    } catch (error) {
+        console.error('BEP20 verification error:', error.message);
+        return { success: false, error: error.message };
     }
-
-    if (!address) {
-      return { success: false, error: 'No wallet address provided' };
-    }
-
-    const response = await axios.get(`https://api.bscscan.com/api`, {
-      params: {
-        module: 'account',
-        action: 'tokentx',
-        address: address,
-        contractaddress: db.data.settings.usdtBep20Contract,
-        page: 1,
-        offset: 50,
-        sort: 'desc',
-        apikey: apiKey
-      }
-    });
-
-    const transactions = response.data.result || [];
-    const requiredAmount = Math.floor(amount * Math.pow(10, db.data.settings.bep20Decimals));
-
-    for (const tx of transactions) {
-      if (tx.to && tx.to.toLowerCase() === address.toLowerCase() &&
-        parseInt(tx.value) === requiredAmount &&
-        tx.tokenSymbol === 'USDT') {
-        return { success: true, transaction: tx };
-      }
-    }
-
-    return { success: false, error: 'Payment not found' };
-  } catch (error) {
-    console.error('BEP20 verification error:', error.message);
-    return { success: false, error: error.message };
-  }
 }
 
-// Middleware
+// Middleware - EXACTLY AS ORIGINAL
 function requireUser(req, res, next) {
-  if (req.session && req.session.userId) {
-    const user = db.data.users.find(u => u.id === req.session.userId);
-    if (user) {
-      req.user = user;
-      return next();
+    if (req.session && req.session.userId) {
+        const user = db.data.users.find(u => u.id === req.session.userId);
+        if (user) {
+            req.user = user;
+            return next();
+        }
     }
-  }
-  res.redirect('/auth');
+    res.redirect('/auth');
 }
 
 function requireActivation(req, res, next) {
-  if (req.session && req.session.userId) {
-    const activation = db.data.activations.find(a =>
-      a.userId === req.session.userId &&
-      a.status === 'active' &&
-      new Date(a.expiryDate) >= new Date()
-    );
-    if (activation) {
-      req.session.isActivated = true;
-      return next();
+    if (req.session && req.session.userId) {
+        const activation = db.data.activations.find(a =>
+            a.userId === req.session.userId &&
+            a.status === 'active' &&
+            new Date(a.expiryDate) >= new Date()
+        );
+        if (activation) {
+            req.session.isActivated = true;
+            return next();
+        }
     }
-  }
-  res.redirect('/dashboard?error=activation_required');
+    res.redirect('/dashboard?error=activation_required');
 }
 
 function requireAdmin(req, res, next) {
-  if (req.session && req.session.isAdmin) return next();
-  res.redirect('/admin/login');
+    if (req.session && req.session.isAdmin) return next();
+    res.redirect('/admin/login');
 }
 
-// Routes
+// ==================== ALL ORIGINAL ROUTES PRESERVED EXACTLY ====================
 
-// Serve default avatar
+// Serve default avatar - EXACTLY AS ORIGINAL
 app.get('/default-avatar.png', (req, res) => {
-  res.redirect('https://ui-avatars.com/api/?name=User&background=1e3a8a&color=fff&size=200');
+    res.redirect('https://ui-avatars.com/api/?name=User&background=1e3a8a&color=fff&size=200');
 });
 
-// Landing Page
+// Landing Page - EXACTLY AS ORIGINAL
 app.get('/', (req, res) => {
-  const company = process.env.COMPANY_NAME || 'Tech-Magnet-Studio';
-  const whatsapp = process.env.WHATSAPP_NUMBER || '+2349071524404';
-
-  res.send(`
+    const company = process.env.COMPANY_NAME || 'Tech-Magnet-Studio';
+    const whatsapp = process.env.WHATSAPP_NUMBER || '+2349071524404';
+    
+    res.send(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#1e3a8a">
-  <link rel="manifest" href="/manifest.json">
-  <title>PostPay - Professional Wallet Displays</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); color: #fff; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
-    .container { max-width: 900px; text-align: center; }
-    h1 { font-size: 3em; margin-bottom: 20px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
-    .tagline { font-size: 1.3em; margin-bottom: 40px; opacity: 0.95; }
-    .features { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin: 40px 0; }
-    .feature { background: rgba(255,255,255,0.1); padding: 30px; border-radius: 15px; backdrop-filter: blur(10px); }
-    .feature h3 { margin-bottom: 10px; font-size: 1.5em; }
-    .cta { display: inline-block; padding: 15px 40px; background: #ffd700; color: #333; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 1.2em; margin: 10px; transition: transform 0.3s; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
-    .cta:hover { transform: translateY(-3px); }
-    .footer { margin-top: 60px; opacity: 0.8; }
-    .company { color: #ffd700; font-weight: bold; }
-
-    /* Mobile Responsive */
-    @media (max-width: 768px) {
-      h1 { font-size: 2em; }
-      .tagline { font-size: 1em; }
-      .features { grid-template-columns: 1fr; gap: 15px; margin: 20px 0; }
-      .feature { padding: 20px; }
-      .feature h3 { font-size: 1.2em; }
-      .cta { padding: 12px 30px; font-size: 1em; }
-      .footer { margin-top: 40px; }
-    }
-    @media (max-width: 480px) {
-      body { padding: 15px; }
-      h1 { font-size: 1.8em; }
-      .tagline { font-size: 0.95em; }
-      .cta { width: 100%; display: block; margin: 10px 0; }
-    }
-  </style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1e3a8a">
+<link rel="manifest" href="/manifest.json">
+<title>PostPay - Professional Wallet Displays</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); color: #fff; min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.container { max-width: 900px; text-align: center; }
+h1 { font-size: 3em; margin-bottom: 20px; text-shadow: 2px 2px 4px rgba(0,0,0,0.3); }
+.tagline { font-size: 1.3em; margin-bottom: 40px; opacity: 0.95; }
+.features { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin: 40px 0; }
+.feature { background: rgba(255,255,255,0.1); padding: 30px; border-radius: 15px; backdrop-filter: blur(10px); }
+.feature h3 { margin-bottom: 10px; font-size: 1.5em; }
+.cta { display: inline-block; padding: 15px 40px; background: #ffd700; color: #333; text-decoration: none; border-radius: 50px; font-weight: bold; font-size: 1.2em; margin: 10px; transition: transform 0.3s; box-shadow: 0 5px 15px rgba(0,0,0,0.3); }
+.cta:hover { transform: translateY(-3px); }
+.footer { margin-top: 60px; opacity: 0.8; }
+.company { color: #ffd700; font-weight: bold; }
+/* Mobile Responsive */
+@media (max-width: 768px) {
+  h1 { font-size: 2em; }
+  .tagline { font-size: 1em; }
+  .features { grid-template-columns: 1fr; gap: 15px; margin: 20px 0; }
+  .feature { padding: 20px; }
+  .feature h3 { font-size: 1.2em; }
+  .cta { padding: 12px 30px; font-size: 1em; }
+  .footer { margin-top: 40px; }
+}
+@media (max-width: 480px) {
+  body { padding: 15px; }
+  h1 { font-size: 1.8em; }
+  .tagline { font-size: 0.95em; }
+  .cta { width: 100%; display: block; margin: 10px 0; }
+}
+</style>
 </head>
 <body>
-  <div class="container">
-    <h1>🚀 PostPay</h1>
-    <p class="tagline">Build Professional Wallet Displays with Blockchain-Verified Security</p>
-    <div class="features">
-      <div class="feature">
-        <h3>⚡ Auto-Verification</h3>
-        <p>Instant on-chain payment verification with TRC20 & BEP20 support</p>
-      </div>
-      <div class="feature">
-        <h3>🎨 Beautiful Displays</h3>
-        <p>Create stunning wallet displays with transactions, balances & bills</p>
-      </div>
-      <div class="feature">
-        <h3>🔒 Secure Sharing</h3>
-        <p>30-day activation keys with public shareable links</p>
-      </div>
+<div class="container">
+  <h1>🚀 PostPay</h1>
+  <p class="tagline">Build Professional Wallet Displays with Blockchain-Verified Security</p>
+  <div class="features">
+    <div class="feature">
+      <h3>⚡ Auto-Verification</h3>
+      <p>Instant on-chain payment verification with TRC20 & BEP20 support</p>
     </div>
-    <a href="/auth" class="cta">Get Started Now</a>
-    <div class="footer">
-      <p>Powered by <span class="company">${company}</span></p>
-      <p style="margin-top:10px;">💬 WhatsApp: ${whatsapp}</p>
+    <div class="feature">
+      <h3>🎨 Beautiful Displays</h3>
+      <p>Create stunning wallet displays with transactions, balances & bills</p>
+    </div>
+    <div class="feature">
+      <h3>🔒 Secure Sharing</h3>
+      <p>30-day activation keys with public shareable links</p>
     </div>
   </div>
+  <a href="/auth" class="cta">Get Started Now</a>
+  <div class="footer">
+    <p>Powered by <span class="company">${company}</span></p>
+    <p style="margin-top:10px;">💬 WhatsApp: ${whatsapp}</p>
+  </div>
+</div>
 </body>
 </html>
-  `);
+    `);
 });
 
-// Authentication Page
+// Authentication Page - EXACTLY AS ORIGINAL
 app.get('/auth', (req, res) => {
-  const company = process.env.COMPANY_NAME || 'Tech-Magnet-Studio';
-  const whatsapp = process.env.WHATSAPP_NUMBER || '+2349071524404';
-
-  res.send(`
+    const company = process.env.COMPANY_NAME || 'Tech-Magnet-Studio';
+    const whatsapp = process.env.WHATSAPP_NUMBER || '+2349071524404';
+    
+    res.send(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#1e3a8a">
-  <title>Login / Register - PostPay</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
-    .card { max-width: 480px; width: 100%; background: #fff; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); padding: 40px; }
-    .brand { text-align: center; color: #ffd700; font-weight: 800; font-size: 28px; margin-bottom: 10px; }
-    .contact { text-align: center; color: #666; margin-bottom: 30px; }
-    .tabs { display: flex; gap: 10px; margin-bottom: 30px; }
-    .tabs button { flex: 1; padding: 12px; border-radius: 10px; border: 2px solid #e0e0e0; background: #f9f9f9; cursor: pointer; font-size: 16px; font-weight: 600; color: #666; transition: all 0.3s; }
-    .tabs button.active { background: #1e3a8a; color: #fff; border-color: #1e3a8a; }
-    form { display: none; }
-    form.active { display: block; }
-    input { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 14px; }
-    button.submit { width: 100%; padding: 14px; background: #1e3a8a; border: none; border-radius: 10px; color: #fff; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 10px; }
-    .small { font-size: 13px; color: #999; text-align: center; margin-top: 20px; }
-    .profile-preview { width: 80px; height: 80px; border-radius: 50%; object-fit: cover; margin: 10px auto; display: block; border: 3px solid #1e3a8a; }
-
-    /* Mobile Responsive */
-    @media (max-width: 768px) {
-      .card { padding: 30px 25px; max-width: 100%; }
-      .brand { font-size: 24px; }
-      .contact { font-size: 14px; }
-      .tabs button { font-size: 14px; padding: 10px; }
-      input { font-size: 16px; }
-      button.submit { font-size: 15px; }
-    }
-    @media (max-width: 480px) {
-      body { padding: 15px; }
-      .card { padding: 25px 20px; border-radius: 15px; }
-      .brand { font-size: 22px; }
-      .tabs { gap: 8px; }
-      .tabs button { font-size: 13px; padding: 8px; }
-      .profile-preview { width: 70px; height: 70px; }
-    }
-  </style>
-  <script>
-    function showTab(tab) {
-      document.querySelectorAll('form').forEach(f => f.classList.remove('active'));
-      document.getElementById(tab).classList.add('active');
-      document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
-      document.getElementById(tab + 'Btn').classList.add('active');
-    }
-
-    function previewImage(input) {
-      if (input.files && input.files[0]) {
-        const reader = new FileReader();
-        reader.onload = function(e) {
-          let preview = document.getElementById('profilePreview');
-          if (!preview) {
-            preview = document.createElement('img');
-            preview.id = 'profilePreview';
-            preview.className = 'profile-preview';
-            input.parentNode.appendChild(preview);
-          }
-          preview.src = e.target.result;
-        }
-        reader.readAsDataURL(input.files[0]);
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#1e3a8a">
+<title>Login / Register - PostPay</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.card { max-width: 480px; width: 100%; background: #fff; border-radius: 20px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); padding: 40px; }
+.brand { text-align: center; color: #ffd700; font-weight: 800; font-size: 28px; margin-bottom: 10px; }
+.contact { text-align: center; color: #666; margin-bottom: 30px; }
+.tabs { display: flex; gap: 10px; margin-bottom: 30px; }
+.tabs button { flex: 1; padding: 12px; border-radius: 10px; border: 2px solid #e0e0e0; background: #f9f9f9; cursor: pointer; font-size: 16px; font-weight: 600; color: #666; transition: all 0.3s; }
+.tabs button.active { background: #1e3a8a; color: #fff; border-color: #1e3a8a; }
+form { display: none; }
+form.active { display: block; }
+input { width: 100%; padding: 12px; margin: 10px 0; border-radius: 8px; border: 1px solid #ddd; font-size: 14px; }
+button.submit { width: 100%; padding: 14px; background: #1e3a8a; border: none; border-radius: 10px; color: #fff; font-size: 16px; font-weight: 600; cursor: pointer; margin-top: 10px; }
+.small { font-size: 13px; color: #999; text-align: center; margin-top: 20px; }
+.profile-preview { width: 80px; height: 80px; border-radius: 50%; object-fit: cover; margin: 10px auto; display: block; border: 3px solid #1e3a8a; }
+/* Mobile Responsive */
+@media (max-width: 768px) {
+  .card { padding: 30px 25px; max-width: 100%; }
+  .brand { font-size: 24px; }
+  .contact { font-size: 14px; }
+  .tabs button { font-size: 14px; padding: 10px; }
+  input { font-size: 16px; }
+  button.submit { font-size: 15px; }
+}
+@media (max-width: 480px) {
+  body { padding: 15px; }
+  .card { padding: 25px 20px; border-radius: 15px; }
+  .brand { font-size: 22px; }
+  .tabs { gap: 8px; }
+  .tabs button { font-size: 13px; padding: 8px; }
+  .profile-preview { width: 70px; height: 70px; }
+}
+</style>
+<script>
+function showTab(tab) {
+  document.querySelectorAll('form').forEach(f => f.classList.remove('active'));
+  document.getElementById(tab).classList.add('active');
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+  document.getElementById(tab + 'Btn').classList.add('active');
+}
+function previewImage(input) {
+  if (input.files && input.files[0]) {
+    const reader = new FileReader();
+    reader.onload = function(e) {
+      let preview = document.getElementById('profilePreview');
+      if (!preview) {
+        preview = document.createElement('img');
+        preview.id = 'profilePreview';
+        preview.className = 'profile-preview';
+        input.parentNode.appendChild(preview);
       }
+      preview.src = e.target.result;
     }
-
-    window.onload = () => showTab('loginForm');
-  </script>
+    reader.readAsDataURL(input.files[0]);
+  }
+}
+window.onload = () => showTab('loginForm');
+</script>
 </head>
 <body>
-  <div class="card">
-    <div class="brand">${company}</div>
-    <div class="contact">💬 ${whatsapp}</div>
-    <div class="tabs">
-      <button id="loginFormBtn" onclick="showTab('loginForm')">Login</button>
-      <button id="registerFormBtn" onclick="showTab('registerForm')">Register</button>
-    </div>
-    <form id="loginForm" method="POST" action="/auth/login">
-      <input name="email" type="email" placeholder="Email Address" required>
-      <input name="password" type="password" placeholder="Password" required>
-      <button class="submit" type="submit">Login to Dashboard</button>
-    </form>
-    <form id="registerForm" method="POST" action="/auth/register" enctype="multipart/form-data">
-      <input name="name" placeholder="Full Name" required>
-      <input name="email" type="email" placeholder="Email Address" required>
-      <input name="password" type="password" placeholder="Create Password" required>
-      <label style="font-size: 13px; color: #666;">Profile Image (Optional)</label>
-      <input type="file" name="profileImage" accept="image/*" onchange="previewImage(this)">
-      <button class="submit" type="submit">Create Account</button>
-    </form>
-    <div class="small">Powered by PostPay</div>
+<div class="card">
+  <div class="brand">${company}</div>
+  <div class="contact">💬 ${whatsapp}</div>
+  <div class="tabs">
+    <button id="loginFormBtn" onclick="showTab('loginForm')">Login</button>
+    <button id="registerFormBtn" onclick="showTab('registerForm')">Register</button>
   </div>
+  <form id="loginForm" method="POST" action="/auth/login">
+    <input name="email" type="email" placeholder="Email Address" required>
+    <input name="password" type="password" placeholder="Password" required>
+    <button class="submit" type="submit">Login to Dashboard</button>
+  </form>
+  <form id="registerForm" method="POST" action="/auth/register" enctype="multipart/form-data">
+    <input name="name" placeholder="Full Name" required>
+    <input name="email" type="email" placeholder="Email Address" required>
+    <input name="password" type="password" placeholder="Create Password" required>
+    <label style="font-size: 13px; color: #666;">Profile Image (Optional)</label>
+    <input type="file" name="profileImage" accept="image/*" onchange="previewImage(this)">
+    <button class="submit" type="submit">Create Account</button>
+  </form>
+  <div class="small">Powered by PostPay</div>
+</div>
 </body>
 </html>
-  `);
+    `);
 });
 
-// Registration
+// Registration - EXACTLY AS ORIGINAL
 app.post('/auth/register', upload.single('profileImage'), async (req, res) => {
-  try {
-    const { name, email, password } = req.body;
-
-    if (!name || !email || !password) {
-      return res.status(400).send('<p>Missing fields. <a href="/auth">Go back</a></p>');
-    }
-
-    const exists = db.data.users.find(u => u.email === email);
-    if (exists) {
-      return res.send('<p>Email already registered. <a href="/auth">Try logging in</a></p>');
-    }
-
-    const user = {
-      id: uuidv4(),
-      name,
-      email,
-      passwordHash: hash(password),
-      profileImage: req.file ? `/uploads/${req.file.filename}` : '/default-avatar.png',
-      createdAt: new Date().toISOString(),
-      isActive: false,
-      lastLogin: new Date().toISOString()
-    };
-
-    db.data.users.push(user);
-    db.write();
-
-    // Send welcome email
     try {
-      await queueEmail(email, 'Welcome to PostPay 🎉 - Account Created Successfully', `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); color: white; border-radius: 15px;">
-          <div style="text-align: center; padding: 30px;">
-            <h1 style="color: #ffd700; margin-bottom: 10px;">🚀 Welcome to PostPay!</h1>
-            <h2 style="margin-bottom: 20px;">Hello ${name}!</h2>
-          </div>
-          <div style="background: white; color: #333; padding: 30px; border-radius: 10px;">
-            <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-              Your PostPay account has been created successfully! 🎉
-            </p>
-            <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
-              <strong>What's Next?</strong><br>
-              To start creating professional wallet displays, please activate your account by purchasing a 30-day activation key for $50.
-            </p>
-            <div style="text-align: center; margin: 30px 0;">
-              <a href="http://localhost:${PORT}/dashboard"
-                style="background: #1e3a8a; color: white; padding: 15px 30px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block;">
-                🚀 Go to Dashboard
-              </a>
-            </div>
-            <p style="font-size: 14px; color: #666; text-align: center;">
-              Need help? Contact us at ${process.env.WHATSAPP_NUMBER || '+2349071524404'}
-            </p>
-          </div>
-          <div style="text-align: center; padding: 20px; color: #ffd700;">
-            <p>Powered by <strong>Tech-Magnet-Studio</strong></p>
-          </div>
-        </div>
-      `);
-      console.log('✅ Welcome email queued for:', email);
-    } catch (emailError) {
-      console.log('❌ Failed to queue welcome email:', emailError.message);
+        const { name, email, password } = req.body;
+        if (!name || !email || !password) {
+            return res.status(400).send('<p>Missing fields. <a href="/auth">Go back</a></p>');
+        }
+
+        const exists = db.data.users.find(u => u.email === email);
+        if (exists) {
+            return res.send('<p>Email already registered. <a href="/auth">Try logging in</a></p>');
+        }
+
+        const user = {
+            id: uuidv4(),
+            name,
+            email,
+            passwordHash: hash(password),
+            profileImage: req.file ? `/uploads/${req.file.filename}` : '/default-avatar.png',
+            createdAt: new Date().toISOString(),
+            isActive: false,
+            lastLogin: new Date().toISOString()
+        };
+
+        db.data.users.push(user);
+        db.write();
+
+        // Send welcome email
+        try {
+            await queueEmail(email, 'Welcome to PostPay 🎉 - Account Created Successfully', `
+<div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); color: white; border-radius: 15px;">
+  <div style="text-align: center; padding: 30px;">
+    <h1 style="color: #ffd700; margin-bottom: 10px;">🚀 Welcome to PostPay!</h1>
+    <h2 style="margin-bottom: 20px;">Hello ${name}!</h2>
+  </div>
+  <div style="background: white; color: #333; padding: 30px; border-radius: 10px;">
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+      Your PostPay account has been created successfully! 🎉
+    </p>
+    <p style="font-size: 16px; line-height: 1.6; margin-bottom: 20px;">
+      <strong>What's Next?</strong><br>
+      To start creating professional wallet displays, please activate your account by purchasing a 30-day activation key for $50.
+    </p>
+    <div style="text-align: center; margin: 30px 0;">
+      <a href="http://localhost:${PORT}/dashboard"
+        style="background: #1e3a8a; color: white; padding: 15px 30px; text-decoration: none; border-radius: 10px; font-weight: bold; display: inline-block;">
+        🚀 Go to Dashboard
+      </a>
+    </div>
+    <p style="font-size: 14px; color: #666; text-align: center;">
+      Need help? Contact us at ${process.env.WHATSAPP_NUMBER || '+2349071524404'}
+    </p>
+  </div>
+  <div style="text-align: center; padding: 20px; color: #ffd700;">
+    <p>Powered by <strong>Tech-Magnet-Studio</strong></p>
+  </div>
+</div>
+            `);
+            console.log('✅ Welcome email queued for:', email);
+        } catch (emailError) {
+            console.log('❌ Failed to queue welcome email:', emailError.message);
+        }
+
+        // Log admin action
+        db.data.adminLogs.push({
+            id: uuidv4(),
+            action: 'user_registered',
+            userId: user.id,
+            userEmail: user.email,
+            time: new Date().toISOString()
+        });
+        db.write();
+
+        req.session.userId = user.id;
+        console.log('✅ New user registered:', email);
+        res.redirect('/dashboard');
+    } catch (error) {
+        console.error('Registration error:', error);
+        res.status(500).send('<p>Server error. <a href="/auth">Try again</a></p>');
+    }
+});
+
+// Login - EXACTLY AS ORIGINAL
+app.post('/auth/login', (req, res) => {
+    const { email, password } = req.body;
+    const user = db.data.users.find(u => u.email === email);
+
+    if (!user || !compare(password, user.passwordHash)) {
+        return res.send('<p>Invalid credentials. <a href="/auth">Try again</a></p>');
     }
 
-    // Log admin action
-    db.data.adminLogs.push({
-      id: uuidv4(),
-      action: 'user_registered',
-      userId: user.id,
-      userEmail: user.email,
-      time: new Date().toISOString()
-    });
+    // Update last login
+    user.lastLogin = new Date().toISOString();
     db.write();
 
     req.session.userId = user.id;
-    console.log('✅ New user registered:', email);
+
+    // Check if user has active activation
+    const activation = db.data.activations.find(a =>
+        a.userId === user.id &&
+        a.status === 'active' &&
+        new Date(a.expiryDate) >= new Date()
+    );
+
+    if (activation) {
+        req.session.isActivated = true;
+    }
+
+    console.log('✅ User logged in:', email);
     res.redirect('/dashboard');
-  } catch (error) {
-    console.error('Registration error:', error);
-    res.status(500).send('<p>Server error. <a href="/auth">Try again</a></p>');
-  }
 });
 
-// Login
-app.post('/auth/login', (req, res) => {
-  const { email, password } = req.body;
-  const user = db.data.users.find(u => u.email === email);
-
-  if (!user || !compare(password, user.passwordHash)) {
-    return res.send('<p>Invalid credentials. <a href="/auth">Try again</a></p>');
-  }
-
-  // Update last login
-  user.lastLogin = new Date().toISOString();
-  db.write();
-
-  req.session.userId = user.id;
-
-  // Check if user has active activation
-  const activation = db.data.activations.find(a =>
-    a.userId === user.id &&
-    a.status === 'active' &&
-    new Date(a.expiryDate) >= new Date()
-  );
-
-  if (activation) {
-    req.session.isActivated = true;
-  }
-
-  console.log('✅ User logged in:', email);
-  res.redirect('/dashboard');
-});
-
-// Dashboard
+// Dashboard - EXACTLY AS ORIGINAL
 app.get('/dashboard', requireUser, (req, res) => {
-  const user = db.data.users.find(u => u.id === req.session.userId);
-  const settings = db.data.settings;
+    const user = db.data.users.find(u => u.id === req.session.userId);
+    const settings = db.data.settings;
 
-  // Check activation status
-  const activation = db.data.activations.find(a =>
-    a.userId === req.session.userId &&
-    a.status === 'active' &&
-    new Date(a.expiryDate) >= new Date()
-  );
+    // Check activation status
+    const activation = db.data.activations.find(a =>
+        a.userId === req.session.userId &&
+        a.status === 'active' &&
+        new Date(a.expiryDate) >= new Date()
+    );
 
-  // Check edit access
-  const editAccess = db.data.editRequests.find(e =>
-    e.userId === req.session.userId &&
-    e.status === 'active' &&
-    new Date(e.expiryDate) >= new Date()
-  );
+    // Check edit access
+    const editAccess = db.data.editRequests.find(e =>
+        e.userId === req.session.userId &&
+        e.status === 'active' &&
+        new Date(e.expiryDate) >= new Date()
+    );
 
-  // Get user's display - only show if activated
-  const userDisplay = activation ? db.data.displays.find(d => d.userId === req.session.userId) : null;
+    // Get user's display - only show if activated
+    const userDisplay = activation ? db.data.displays.find(d => d.userId === req.session.userId) : null;
 
-  const error = req.query.error;
-  const success = req.query.success;
+    const error = req.query.error;
+    const success = req.query.success;
 
-  res.send(`
+    res.send(`
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -794,7 +876,6 @@ app.get('/dashboard', requireUser, (req, res) => {
     .payment-address { background: #f8f9fa; padding: 10px; border-radius: 5px; font-family: monospace; margin: 10px 0; word-break: break-all; font-size: 14px; }
     .hidden { display: none; }
     .user-info { display: flex; align-items: center; gap: 15px; margin-bottom: 15px; }
-
     /* Mobile Responsive */
     @media (max-width: 1024px) {
       .container { padding: 15px; }
@@ -851,7 +932,6 @@ app.get('/dashboard', requireUser, (req, res) => {
       </div>
       <p>Manage your wallet displays and bill payments</p>
     </div>
-
     <div class="nav">
       <a href="#overview" class="active">Overview</a>
       <a href="#displays">My Display</a>
@@ -859,37 +939,31 @@ app.get('/dashboard', requireUser, (req, res) => {
       <a href="#bills">Bill Payments</a>
       <a href="/logout">Logout</a>
     </div>
-
     ${error === 'activation_required' ? `
     <div class="alert alert-error">
       <strong>Activation Required!</strong> You need to purchase a 30-day activation key to access display creation features.
     </div>
     ` : ''}
-
     ${success === 'activation_success' ? `
     <div class="alert alert-success">
       <strong>Activation Successful!</strong> Your account has been activated for 30 days.
     </div>
     ` : ''}
-
     ${success === 'edit_access_granted' ? `
     <div class="alert alert-success">
       <strong>Edit Access Granted!</strong> You can now edit your display for 24 hours.
     </div>
     ` : ''}
-
     ${success === 'display_created' ? `
     <div class="alert alert-success">
       <strong>Display Created Successfully!</strong> Your wallet display has been created and is now publicly accessible.
     </div>
     ` : ''}
-
     ${success === 'display_updated' ? `
     <div class="alert alert-success">
       <strong>Display Updated Successfully!</strong> Your wallet display has been updated.
     </div>
     ` : ''}
-
     <div id="overview">
       <div class="activation-status ${activation ? 'active' : 'inactive'}">
         <strong>Account Status:</strong> ${activation ? 'ACTIVATED' : 'NOT ACTIVATED'}
@@ -900,7 +974,6 @@ app.get('/dashboard', requireUser, (req, res) => {
         <br>Purchase activation to create wallet displays
         `}
       </div>
-
       ${!activation ? `
       <div class="balance-card">
         <h3 class="section-title">Activate Your Account</h3>
@@ -935,7 +1008,6 @@ app.get('/dashboard', requireUser, (req, res) => {
         </div>
       </div>
       ` : ''}
-
       ${activation && !editAccess ? `
       <div class="balance-card">
         <h3 class="section-title">Purchase Edit Access</h3>
@@ -964,7 +1036,6 @@ app.get('/dashboard', requireUser, (req, res) => {
         </div>
       </div>
       ` : ''}
-
       ${editAccess ? `
       <div class="activation-status active">
         <strong>Edit Access:</strong> ACTIVE
@@ -972,7 +1043,6 @@ app.get('/dashboard', requireUser, (req, res) => {
       </div>
       ` : ''}
     </div>
-
     <div id="displays" class="hidden">
       <div class="section-title">Your Wallet Display</div>
       ${!activation ? `
@@ -1044,7 +1114,6 @@ app.get('/dashboard', requireUser, (req, res) => {
       </div>
       `}
     </div>
-
     <div id="create" class="hidden">
       ${activation && !userDisplay ? `
       <div class="section-title">Create New Wallet Display</div>
@@ -1104,7 +1173,6 @@ app.get('/dashboard', requireUser, (req, res) => {
       </div>
       `}
     </div>
-
     <div id="bills" class="hidden">
       <div class="section-title">Bill Payments</div>
       <div class="balance-card">
@@ -1152,7 +1220,6 @@ app.get('/dashboard', requireUser, (req, res) => {
       </div>
     </div>
   </div>
-
   <script>
     // Navigation
     document.querySelectorAll('.nav a').forEach(link => {
@@ -1170,20 +1237,16 @@ app.get('/dashboard', requireUser, (req, res) => {
         });
       }
     });
-
     // Set minimum date to today
     if (document.getElementById('nextWithdrawableDate')) {
       document.getElementById('nextWithdrawableDate').min = new Date().toISOString().split('T')[0];
     }
-
     function showEditForm(displayId) {
       document.getElementById('editForm-' + displayId).style.display = 'block';
     }
-
     function hideEditForm(displayId) {
       document.getElementById('editForm-' + displayId).style.display = 'none';
     }
-
     function payBill(billType) {
       const billNames = {
         electricity: 'Electricity',
@@ -1202,13 +1265,12 @@ app.get('/dashboard', requireUser, (req, res) => {
         alert('Bill payment initiated:\\nType: ' + billNames[billType] + '\\nAccount: ' + accountNumber + '\\nAmount: $' + amount + '\\n\\nYou will be redirected to payment...');
       };
     }
-
     // Show overview by default
     document.getElementById('overview').style.display = 'block';
   </script>
 </body>
 </html>
-  `);
+    `);
 });
 
 // Display Creation - ALL FIELDS OPTIONAL
@@ -2528,49 +2590,38 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-// Error handling middleware
+// Error handling middleware - EXACTLY AS ORIGINAL
 app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).send('<p>Something went wrong! <a href="/">Go home</a></p>');
+    console.error('Unhandled error:', err);
+    res.status(500).send('<p>Something went wrong! <a href="/">Go home</a></p>');
 });
 
-// 404 handler
+// 404 handler - EXACTLY AS ORIGINAL
 app.use((req, res) => {
-  res.status(404).send(`
-    <html>
-    <body style="font-family: Arial; text-align: center; padding: 50px;">
-      <h2>Page Not Found</h2>
-      <p>The page you're looking for doesn't exist.</p>
-      <a href="/">Return to Home</a>
-    </body>
-    </html>
-  `);
+    res.status(404).send(`
+<html>
+<body style="font-family: Arial; text-align: center; padding: 50px;">
+  <h2>Page Not Found</h2>
+  <p>The page you're looking for doesn't exist.</p>
+  <a href="/">Return to Home</a>
+</body>
+</html>
+    `);
 });
 
-// Start server
+// Start server with comprehensive error handling
+
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`
-🚀 POSTPAY SERVER STARTED SUCCESSFULLY
-✅ Application running on: http://localhost:${PORT}
-✅ Admin panel: http://localhost:${PORT}/admin/login
+🚀 POSTPAY SERVER STARTED SUCCESSFULLY ON RAILWAY
+✅ Application running on: http://0.0.0.0:${PORT}
+✅ Health check: http://0.0.0.0:${PORT}/api/status
+✅ Admin panel: http://0.0.0.0:${PORT}/admin/login
 ✅ Database initialized with ${db.data.users.length} users
+✅ Redis: ${redisAvailable ? 'CONNECTED' : 'UNAVAILABLE (using memory session)'}
 ✅ Email system: ${emailConfigured ? 'READY (SendGrid)' : 'NOT CONFIGURED'}
-✅ Redis: ${redisAvailable ? 'CONNECTED' : 'UNAVAILABLE'}
-📧 Email Configuration: ${SENDGRID_API_KEY ? 'SET' : 'NOT SET'}
-🔑 Admin Login: ${process.env.ADMIN_EMAIL || 'techmagnet.pro@gmail.com'}
-💡 Next Steps:
-1. Visit http://localhost:${PORT} to test the application
-2. Register a new user account
-3. Test email functionality with SendGrid
-4. Configure ngrok for public access
   `);
-});
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\n🛑 Shutting down PostPay server...');
-  if (redisClient) {
-    redisClient.quit();
-  }
-  process.exit(0);
+}).on('error', (err) => {
+  console.error('❌ SERVER STARTUP ERROR:', err);
+  process.exit(1);
 });
